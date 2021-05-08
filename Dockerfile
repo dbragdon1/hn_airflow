@@ -7,6 +7,7 @@ RUN apt install build-essential -y
 # Install Airflow system dependencies: https://airflow.apache.org/docs/apache-airflow/stable/installation.html#system-dependencies
 # NOTE: we have changed krb5-user to libkrb5-dev for a non-interactive installation
 RUN apt-get install -y --no-install-recommends \
+    libpq-dev \
     freetds-bin \
     ldap-utils \
     libffi6 \
