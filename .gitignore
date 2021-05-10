@@ -120,3 +120,6 @@ venv.bak/
 
 # Makefile
 .Makefile
+
+#My extras
+/experiments
