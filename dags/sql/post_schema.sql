@@ -1,0 +1,33 @@
+CREATE TABLE IF NOT EXISTS post (
+id INT NOT NULL UNIQUE,
+type VARCHAR NOT NULL,
+time_posted TIMESTAMP NOT NULL,
+by VARCHAR NOT NULL,
+deleted BOOLEAN,
+PRIMARY KEY(id));
+
+CREATE TABLE IF NOT EXISTS job (
+post_id INT NOT NULL UNIQUE,
+text_content VARCHAR,
+title VARCHAR,
+url VARCHAR,
+PRIMARY KEY(post_id),
+CONSTRAINT fk_id
+	FOREIGN KEY(post_id)
+		REFERENCES post(id)
+);
+
+CREATE TABLE IF NOT EXISTS comment (
+post_id INT NOT NULL UNIQUE,
+text_content VARCHAR,
+parent INT,
+PRIMARY KEY(post_id),
+CONSTRAINT fk_id
+	FOREIGN KEY(post_id)
+		REFERENCES post(id)
+);
+
+CREATE TABLE IF NOT EXISTS post (
+	id serial NOT NULL PRIMARY KEY,
+	info json NOT NULL
+)

@@ -1,115 +1,109 @@
-# Airflow Codebase Template
 
-## Background
+## Working with the Hackernews API
 
-Apache Airflow is the leading orchestration tool for batch workloads. Originally conceived at Facebook and eventually open-sourced at AirBnB, Airflow allows you to define complex directed acyclic graphs (DAG) by writing simple Python. 
+The [Hackernews API](https://github.com/HackerNews/API) is a REST api that allows you to access historic post data through unique post ids. To access any post, you visit the following link:
 
-Airflow has a number of built-in concepts that make data engineering simple, including DAGs (which describe how to run a workflow) and Operators (which describe what actually gets done). See the Airflow documentation for more detail: https://airflow.apache.org/concepts.html 
+```
+https://hacker-news.firebaseio.com/v0/item/postID.json?print=pretty
+```
 
-Airflow also comes with its own architecture: a database to persist the state of DAGs and connections, a web server that supports the user-interface, and workers that are managed together by the scheduler and database. Logs persist both in flat files and the database, and Airflow can be setup to write remote logs (to S3 for example). Logs are viewable in the UI.
+where `postID` is replaced with the post's unique id. For example, viewing the post with ID `1000` would require visiting:
 
-![Airflow Architecture](docs/airflow_architecture.png)
+```
+https://hacker-news.firebaseio.com/v0/item/1000.json?print=pretty
+```
 
-## A Note on managing Airflow dependencies
+which results in a json file of attributes corresponding to the post:
 
-Airflow is tricky to install correctly because it is both an application and a library. Applications freeze their dependencies to ensure stability, while libraries leave their dependencies open for upgrades to take advantage of new features. Airflow is both, so it doesn't freeze dependencies. This means that depending on the day, a simple `pip install apache-airflow` is not guaranteed to produce a workable version of the Airflow application. 
+```
+{
+  "by" : "python_kiss",
+  "descendants" : 0,
+  "id" : 1000,
+  "score" : 4,
+  "time" : 1172394646,
+  "title" : "How Important is the .com TLD?",
+  "type" : "story",
+  "url" : "http://www.netbusinessblog.com/2007/02/19/how-important-is-the-dot-com/"
+}
 
-To combat this, Airflow provides a set of [constraints files](https://airflow.apache.org/docs/apache-airflow/stable/installation.html#constraints-files) that are known working versions of Airflow. 
+```
+## Scheduling comment ingestion
 
-This template installs Airflow using the constraints file at `https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt` and allows for building a custom Airflow image on top of this constraints file by simply adding additional dependencies to `airflow.requirements.txt`. Local dependencies are added to `local-requirements.txt`. 
 
-### Why not just use the [official docker-compose file](https://github.com/apache/airflow/blob/master/docs/apache-airflow/start/docker-compose.yaml)?
+In order to manage a workflow of inserting new and old posts into the postgres database I used some simple airflow mechanics.
 
-It's easier to customize our additional dependencies with Airflow by building our own image. The master Airflow image doesn't allow this kind of low-level control. 
+The first step was creating a task that could backfill historic data into the database. This was simple enough, and simply required that only posts older than the oldest post in the database be inserted.
 
-This template is particularly useful to Airflow power users that tend to write a lot of custom plugins or functionality using external dependencies. 
 
-### Why not just extend off of the [official Airflow image](https://airflow.apache.org/docs/apache-airflow/stable/production-deployment.html#production-container-images)?
+First we start with the helper function:
 
-You can do this, but customizing the image yields far more optimizations, and doesn't come with any additional complexity. To add Airflow extras, you can simply add it to the `AIRFLOW_EXTRAS` variable in the Makefile:
+```python
+def get_historic_posts(n: int):
+    try:
+        conn = psycopg2.connect(
+            dbname = 'hackernews',
+            user = 'postgres',
+            host = 'host.docker.internal',
+            password = 'postgres'
+        )
 
-        AIRFLOW_EXTRAS := postgres,google
+        cur = conn.cursor()
 
-To install any other pip dependencies, simply add it to `airflow.requirements.txt`.
+        #get oldest post ID from database
+        cur.execute("SELECT MIN(info->>'id')::int FROM post_json")
+        oldest = cur.fetchone()[0]
 
-## Getting Started
+        #if table is empty, start from newest post on the API
+        if not oldest:
+            r = requests.get(newest_id_fmt)
+            oldest = r.json()
+            r = requests.get(post_fmt.format(oldest))
+            obj = r.json()
+            cur.execute("INSERT INTO post_json (info) VALUES (%s)",
+                        [Json(obj)])
+            #decrease n by 1 to account for single post in table
+            n -= 1
 
-This repository was created with `Python 3.8.6`, but should work for all versions of Python 3. 
+        #now oldest post in table is either:
+          #1. most recent post in API or
+          #2. post corresponding to smallest ID in table
 
-DAGs should be developed & tested locally first, before being promoted to a development environment for integration testing. Once DAGs are successful in the lower environments, they can be promoted to production. 
+        #starting from oldest post in table, count backwards from n
+        for i in range(n):
+            oldest -= 1
+            r = requests.get(post_fmt.format(oldest))
+            obj = r.json()
+            cur.execute("INSERT INTO post_json (info) VALUES (%s)",
+                        [Json(obj)])
+        conn.commit()
+        conn.close()
 
-Code is contributed either in `dags`, a directory that houses all Airflow DAG configuration files, or `plugins`, a directory that houses Python objects that can be used to extend Airflow.
+    except Error as E:
+        print(E)
+```
 
-### Running Airflow locally
+```python
+historic_data_dag = DAG(
+    dag_id = "collect_historic_data",
+    default_args = default_args,
+    description = "Get historic post data",
+    schedule_interval = None,
+    start_date = days_ago(2)
+)
 
-This project uses a Makefile to consolidate common commands and make it easy for anyone to get started. To run Airflow locally, simply:
+get_historic_posts_task = PythonOperator(
+                        task_id = 'get_historic_posts',
+                        python_callable = get_historic_posts,
+                        op_kwargs = {'n': 50},
+                        dag = historic_data_dag)
+```
 
-        make start-airflow
 
-This command will build your local Airflow image and start Airflow automatically!
+1. A task must be created for adding newly created posts
+2. A separate task must be created for backfilling the database with historic comments
 
-Navigate to http://localhost:8080/ and start writing & testing your DAGs! Login with the user-password combo: `admin:admin` (you can change this in `docker-compose.yaml`).
 
-You'll notice in `docker-compose.yaml` that both DAGs and plugins are mounted as volumes. This means once Airflow is started, any changes to your code will be quickly synced to the webserver and scheduler. You shouldn't have to restart the Airflow instance during a period of development! 
 
-When you're done, simply:
 
-        make stop-airflow
-
-### Testing & Linting
-
-Instantiating a local virtual environment is now entirely optional. You can develop entirely through Docker, as Airflow runs inside of docker-compose and `test-docker` and `lint-docker` provide avenues for running those steps without a virtual environment. 
-
-However, not using a virtual environment also means sacrificing any linting/language-server functionality provided by your IDE. To setup your virtual environment:
-
-        make  venv
-
-This project is also fully linted with black and pylint, even using a cool pylint plugin called [pylint-airflow](https://pypi.org/project/pylint-airflow/). To run linting:
-
-With your virtual environment: 
-
-        make lint
-
-With Docker:
-
-        make lint-docker
-
-Any tests can be placed under `tests`, we've already included a few unit tests for validating all of your DAGs and plugins to make sure they're valid to install in Airflow. To run tests:
-
-With your virtual environment:
-
-        make test
-
-Inside Docker:
-        
-        make test-docker
-
-### Cleaning up your local environment
-
-If at any point you simply want to clean up or reset your local environment, you can run the following commands:
-
-Reset your local docker-compose:
-
-        make reset-airflow
-
-Rebuild the local Airflow image for docker-compose (useful if you make changes to the Dockerfile):
-        
-        make rebuild-airflow
-
-Clean up Pytest artifacts:
-        
-        make clean-pytest
-
-Reset your virtual environment:
-
-        make clean-venv
-
-Start completely from scratch:
-
-        make clean-all
-
-### Deployment
-
-Once you've written your DAGs, the next step is to deploy them to your Airflow instance. This is a matter of syncing the `dags` and `plugins` directories to their respective destinations. 
-
-TODO: add some examples and documentation of deployments to different Airflow cloud providers (Astronomer, Cloud Composer, etc.) using different CI technologies (CircleCI, Github Actions, etc.)
+### Pushing New Comments to database
